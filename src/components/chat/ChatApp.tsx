@@ -7,6 +7,8 @@ import ChatInput, { ChatInputRef } from "./ChatInput";
 import Sidebar from "./Sidebar";
 import { v4 as uuidv4 } from "uuid";
 
+import type { WidgetOptions } from "../../types";
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
@@ -22,13 +24,18 @@ export type Conversation = {
   isPinned?: boolean;
 };
 
-export default function ChatApp() {
+interface ChatAppProps {
+  options?: WidgetOptions;
+  onClose?: () => void;
+}
+
+export default function ChatApp({ options, onClose }: ChatAppProps) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [model, setModel] = useState("google/gemini-2.5-flash");
+  const [model, setModel] = useState(options?.defaultModel || "google/gemini-2.5-flash");
   const [isStreaming, setIsStreaming] = useState(false);
   const [isInitialized, setIsInitialized] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => typeof window !== 'undefined' ? window.innerWidth > 768 : false);
   const chatInputRef = useRef<ChatInputRef>(null);
 
   useEffect(() => {
@@ -144,14 +151,24 @@ export default function ChatApp() {
         };
       });
 
-      const response = await fetch("/api/chat", {
+      const openRouterKey = options?.openRouterKey || "YOUR_OPENROUTER_API_KEY_HERE";
+      
+      if (!openRouterKey || openRouterKey === "YOUR_OPENROUTER_API_KEY_HERE") {
+        throw new Error("Missing OpenRouter API Key. Please provide it in the Widget initialization options.");
+      }
+
+      const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
         method: "POST",
         headers: {
+          "Authorization": `Bearer ${openRouterKey}`,
           "Content-Type": "application/json",
+          "HTTP-Referer": window.location.href,
+          "X-Title": "Vibe Chat Widget",
         },
         body: JSON.stringify({
           model,
           messages: messagesPayload,
+          stream: true,
         }),
       });
 
@@ -254,6 +271,7 @@ export default function ChatApp() {
         <ChatHeader 
           onClearChat={handleClearChat}
           onToggleSidebar={() => setIsSidebarOpen(!isSidebarOpen)}
+          onClose={onClose}
         />
         
         <MessageList 

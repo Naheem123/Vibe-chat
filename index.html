@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Vibe Chat Widget Dev</title>
+  </head>
+  <body>
+    <!-- The widget will inject itself into the body -->
+    <div style="padding: 2rem; font-family: sans-serif;">
+      <h1>Host Application</h1>
+      <p>This is a simulated host application to test the Vibe Chat Widget SDK.</p>
+    </div>
+    
+    <script type="module">
+      import { init } from './src/index.ts';
+      
+      // Initialize the widget using the key from .env.local
+      init({
+        openRouterKey: import.meta.env.VITE_OPENROUTER_API_KEY || "YOUR_KEY_HERE",
+        defaultModel: "google/gemini-2.5-flash",
+        accentColor: "#4B1F3F",
+        initialState: "closed"
+      });
+    </script>
+  </body>
+</html>

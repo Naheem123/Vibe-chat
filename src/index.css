@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+@theme {
+  --color-zinc-50: #fafafa;
+  --color-zinc-900: #18181b;
+  --color-zinc-950: #09090b;
+}
+
+/* Custom styles for the widget */
+.vibe-chat-widget-open {
+  /* Add any additional CSS classes needed here */
+}

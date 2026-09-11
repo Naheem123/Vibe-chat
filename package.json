@@ -1,16 +1,24 @@
 {
-  "name": "vibe-chat",
+  "name": "vibe-chat-sdk",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
+  "type": "module",
+  "main": "./public/dist/vibe-chat-widget.js",
+  "module": "./public/dist/vibe-chat-sdk.es.js",
+  "types": "./public/dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./public/dist/vibe-chat-sdk.es.js",
+      "require": "./public/dist/vibe-chat-widget.js"
+    }
+  },
   "scripts": {
-    "dev": "next dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
     "lucide-react": "^1.18.0",
-    "next": "16.2.9",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "react-markdown": "^10.1.0",
@@ -20,14 +28,15 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@tailwindcss/vite": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/react-syntax-highlighter": "^15.5.13",
     "@types/uuid": "^10.0.0",
-    "eslint": "^9",
-    "eslint-config-next": "16.2.9",
+    "@vitejs/plugin-react": "^4.3.4",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vite": "^6.0.0"
   }
 }
