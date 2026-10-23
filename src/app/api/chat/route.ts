@@ -23,7 +23,7 @@ export async function POST(req: NextRequest) {
       headers: {
         "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
         "Content-Type": "application/json",
-        "HTTP-Referer": "http://localhost:3000",
+        "HTTP-Referer": req.nextUrl.origin || "https://vibe-chat-sdk.com",
         "X-Title": "Vibe Chat Clone",
       },
       body: JSON.stringify({
