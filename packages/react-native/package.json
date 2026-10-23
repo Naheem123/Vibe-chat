@@ -1,0 +1,61 @@
+{
+  "name": "@noblesse/vibe-chat-native",
+  "version": "1.0.0",
+  "description": "Production-ready AI Chat Widget and Screen View SDK for React Native (iOS & Android) with configurable theming, user-isolated history, and streaming support.",
+  "main": "./dist/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.esm.json",
+    "prepublishOnly": "npm run build",
+    "test": "node --test"
+  },
+  "keywords": [
+    "react-native",
+    "chat",
+    "ai",
+    "sdk",
+    "widget",
+    "openrouter",
+    "noblesse-tribe",
+    "llm",
+    "gemini",
+    "gpt-4"
+  ],
+  "author": "Noblesse Tribe & VibeChat Contributors",
+  "license": "MIT",
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-native": ">=0.68.0"
+  },
+  "peerDependenciesMeta": {
+    "@react-native-async-storage/async-storage": {
+      "optional": true
+    },
+    "@react-native-clipboard/clipboard": {
+      "optional": true
+    },
+    "react-native-safe-area-context": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-native": "^0.73.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "noblesse-vibe-chat-example",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "react-native start",
+    "android": "react-native run-android",
+    "ios": "react-native run-ios"
+  },
+  "dependencies": {
+    "@noblesse/vibe-chat-native": "file:../packages/react-native",
+    "react": "18.3.1",
+    "react-native": "0.76.5"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.25.0",
+    "@babel/preset-env": "^7.25.0",
+    "@types/react": "^18.3.0",
+    "typescript": "^5.0.0"
+  }
+}
