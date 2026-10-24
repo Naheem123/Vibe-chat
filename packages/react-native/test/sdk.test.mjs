@@ -234,7 +234,7 @@ test('Lifecycle: Discards stale streaming chunks when account changes mid-reques
 // ---------------------------------------------------------------------------
 // 7. Regression: Persistence Race Condition Prevention
 // ---------------------------------------------------------------------------
-test('Persistence: Race-proof loadedUserId check prevents cross-account overwrites', async () => {
+test('Persistence: Race-proof initializedForUserId check prevents cross-account overwrites', async () => {
   const { InMemoryStorageAdapter, saveUserConversations, loadUserConversations } = storageModule;
   const storage = new InMemoryStorageAdapter();
 
@@ -247,34 +247,175 @@ test('Persistence: Race-proof loadedUserId check prevents cross-account overwrit
   await saveUserConversations(storage, lardeyOriginal, 'user_lardey');
 
   // Simulate component state
-  let currentLoadedScope = 'user_alex'; // Alex is currently loaded in memory
+  let initializedForUserId = 'user_alex'; // Alex is initialized in memory
   let inMemoryConversations = [...alexOriginal];
 
   // User switches to Lardey:
   let userIdProp = 'user_lardey';
-  currentLoadedScope = null; // Step 1: Invalidate loaded scope immediately!
+  initializedForUserId = null; // Step 1: Immediately de-initialize!
 
   // In the persistence effect:
-  // if (currentLoadedScope === userIdProp && isInitialized) -> save
-  const canPersist = currentLoadedScope === userIdProp;
-  assert.equal(canPersist, false, 'Persistence effect MUST NOT run while loaded scope is invalidated');
+  // if (initializedForUserId === userIdProp) -> save
+  const canPersist = initializedForUserId === userIdProp;
+  assert.equal(canPersist, false, 'Persistence effect MUST NOT run while de-initialized');
 
-  // If someone attempted to save without checking currentLoadedScope, it would corrupt Lardey!
-  // But because canPersist is false, Lardey's storage is untouched.
+  // Because canPersist is false, Lardey's storage remains completely intact
   const verifyLardey = await loadUserConversations(storage, 'user_lardey');
   assert.equal(verifyLardey[0].title, 'Lardey Notes');
 
   // Step 2: Now Lardey loads asynchronously
   const loadedLardey = await loadUserConversations(storage, 'user_lardey');
   inMemoryConversations = loadedLardey;
-  currentLoadedScope = 'user_lardey';
+  initializedForUserId = 'user_lardey';
 
   // Now persistence is safe
-  assert.equal(currentLoadedScope, userIdProp);
+  assert.equal(initializedForUserId, userIdProp);
 });
 
 // ---------------------------------------------------------------------------
-// 8. Regression: AsyncStorage Persistence Across App Restarts
+// 8. Regression: Rapid Account Switching Stress Test (Out-of-Order Async Reads)
+// ---------------------------------------------------------------------------
+test('Lifecycle: Rapid account switching ignores out-of-order stale async storage reads', async () => {
+  const { InMemoryStorageAdapter, saveUserConversations, loadUserConversations } = storageModule;
+  const storage = new InMemoryStorageAdapter();
+
+  // Seed 3 users
+  await saveUserConversations(storage, [{ id: 'a', title: 'User A Convo', messages: [], updatedAt: 1, userId: 'user_A' }], 'user_A');
+  await saveUserConversations(storage, [{ id: 'b', title: 'User B Convo', messages: [], updatedAt: 2, userId: 'user_B' }], 'user_B');
+  await saveUserConversations(storage, [{ id: 'c', title: 'User C Convo', messages: [], updatedAt: 3, userId: 'user_C' }], 'user_C');
+
+  // Monotonic request counter and state simulators
+  let loadRequestId = 0;
+  let activeUserId = 'user_A';
+  let inMemoryConversations = [];
+  let initializedForUserId = null;
+
+  // Function simulating loadHistoryForUser effect
+  const switchUser = (newUserId, simulatedDelayMs) => {
+    activeUserId = newUserId;
+    const currentScope = newUserId;
+    const currentRequestId = ++loadRequestId;
+
+    // Immediately de-initialize and clear in-memory state
+    initializedForUserId = null;
+    inMemoryConversations = [];
+
+    return new Promise((resolve) => {
+      setTimeout(async () => {
+        const loaded = await loadUserConversations(storage, newUserId);
+
+        // Stale check
+        if (currentRequestId !== loadRequestId || currentScope !== activeUserId) {
+          resolve({ discarded: true, user: newUserId });
+          return;
+        }
+
+        inMemoryConversations = loaded;
+        initializedForUserId = currentScope;
+        resolve({ discarded: false, user: newUserId });
+      }, simulatedDelayMs);
+    });
+  };
+
+  // Simulate rapid switching:
+  // User A -> User B (slow read: 60ms) -> User C (fast read: 10ms)
+  const pB = switchUser('user_B', 60);
+  const pC = switchUser('user_C', 10);
+
+  const [resB, resC] = await Promise.all([pB, pC]);
+
+  // User B was overtaken by User C; it must have been discarded!
+  assert.equal(resB.discarded, true, 'User B read must be discarded because User C took over');
+  assert.equal(resC.discarded, false, 'User C read must settle');
+
+  // Final settled state must strictly belong to User C
+  assert.equal(activeUserId, 'user_C');
+  assert.equal(initializedForUserId, 'user_C');
+  assert.equal(inMemoryConversations[0].title, 'User C Convo');
+
+  // Ensure storage for User B was never overwritten by User A's or User C's data
+  const checkB = await loadUserConversations(storage, 'user_B');
+  assert.equal(checkB[0].title, 'User B Convo');
+});
+
+// ---------------------------------------------------------------------------
+// 9. Regression: Genuine Incremental Streaming on Hermes via XHR Simulation
+// ---------------------------------------------------------------------------
+test('Transport Engine: Verifies incremental token streaming without full response buffering', async () => {
+  // Mock XMLHttpRequest that simulates network packets arriving in chunks
+  class MockXHR {
+    readyState = 0;
+    status = 200;
+    responseText = '';
+    onprogress = null;
+    onreadystatechange = null;
+    headers = {};
+
+    open(method, url) { this.readyState = 1; }
+    setRequestHeader(k, v) { this.headers[k] = v; }
+    send(body) {
+      this.readyState = 2;
+
+      // Simulate chunk 1
+      setTimeout(() => {
+        this.readyState = 3;
+        this.responseText += 'data: {"choices":[{"delta":{"content":"Noblesse "}}]}\n\n';
+        this.onprogress?.();
+        this.onreadystatechange?.();
+      }, 5);
+
+      // Simulate chunk 2
+      setTimeout(() => {
+        this.readyState = 3;
+        this.responseText += 'data: {"choices":[{"delta":{"content":"Tribe "}}]}\n\n';
+        this.onprogress?.();
+        this.onreadystatechange?.();
+      }, 15);
+
+      // Simulate chunk 3 + DONE
+      setTimeout(() => {
+        this.readyState = 4;
+        this.responseText += 'data: {"choices":[{"delta":{"content":"Rocks!"}}]}\n\ndata: [DONE]\n\n';
+        this.onprogress?.();
+        this.onreadystatechange?.();
+      }, 25);
+    }
+  }
+
+  // Inject mock XHR into globalThis
+  const originalXHR = globalThis.XMLHttpRequest;
+  globalThis.XMLHttpRequest = MockXHR;
+
+  // Force isReactNativeEnvironment simulation
+  globalThis.HermesInternal = {};
+
+  try {
+    const receivedChunks = [];
+    const finalResult = await transportModule.defaultOpenRouterTransport(
+      {
+        model: 'google/gemini-2.5-flash',
+        messages: [{ role: 'user', content: 'Test' }],
+        stream: true,
+      },
+      (chunk) => {
+        receivedChunks.push(chunk);
+      }
+    );
+
+    // Verify incremental delivery: multiple chunk callbacks fired BEFORE final completion!
+    assert.equal(receivedChunks.length >= 3, true, 'Chunks must be delivered incrementally over time');
+    assert.equal(receivedChunks[0], 'Noblesse ');
+    assert.equal(receivedChunks[1], 'Noblesse Tribe ');
+    assert.equal(finalResult, 'Noblesse Tribe Rocks!');
+  } finally {
+    // Cleanup
+    globalThis.XMLHttpRequest = originalXHR;
+    delete globalThis.HermesInternal;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 10. Regression: AsyncStorage Persistence Across App Restarts
 // ---------------------------------------------------------------------------
 test('Persistence: Simulates cold app boot and multi-session storage adapter', async () => {
   const { createAsyncStorageAdapter, saveUserConversations, loadUserConversations } = storageModule;

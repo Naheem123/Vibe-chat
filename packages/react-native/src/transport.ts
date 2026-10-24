@@ -316,8 +316,23 @@ async function streamViaFetchReader(
 }
 
 /**
+ * Detects whether the current runtime is React Native (Hermes, Old Arch, or New Arch).
+ */
+export function isReactNativeEnvironment(): boolean {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const g = globalThis as any;
+  return (
+    typeof g.HermesInternal !== 'undefined' ||
+    (typeof navigator !== 'undefined' && navigator.product === 'ReactNative') ||
+    typeof g.nativeCallSyncHook !== 'undefined' ||
+    typeof g.__fbBatchedBridge !== 'undefined' ||
+    typeof g.RN$Bridgeless !== 'undefined'
+  );
+}
+
+/**
  * Default OpenRouter / Custom Transport implementation.
- * Seamlessly selects between XMLHttpRequest (React Native Hermes) and
+ * Seamlessly selects between XMLHttpRequest (React Native Hermes iOS/Android) and
  * ReadableStream (Fetch API) for genuine real-time streaming without buffering.
  */
 export const defaultOpenRouterTransport: ChatTransport = async (
@@ -348,25 +363,14 @@ export const defaultOpenRouterTransport: ChatTransport = async (
     stream: req.stream !== false,
   };
 
-  // 1. In React Native Hermes environments without ReadableStream, use XMLHttpRequest for genuine streaming
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const hasXHR = typeof (globalThis as any).XMLHttpRequest !== 'undefined';
-  const hasFetch = typeof fetch === 'function';
+  const isRN = isReactNativeEnvironment();
 
-  // If fetch response.body has no getReader (standard in React Native), prefer XHR streaming
-  if (hasXHR && hasFetch) {
-    try {
-      // Test if global fetch returns a body with getReader
-      const testFetchBody = hasFetch ? true : false;
-      // In React Native, globalThis.navigator?.product === 'ReactNative'
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const isReactNative = (globalThis as any).navigator?.product === 'ReactNative';
-      if (isReactNative && hasXHR) {
-        return await streamViaXHR(url, headers, payload, req.signal, onChunk);
-      }
-    } catch {
-      /* fallback to standard flow */
-    }
+  // 1. In React Native Hermes (iOS & Android), global fetch lacks ReadableStream body reader.
+  // Using XMLHttpRequest with onprogress provides genuine incremental token-by-token streaming.
+  if (isRN && hasXHR) {
+    return await streamViaXHR(url, headers, payload, req.signal, onChunk);
   }
 
   // 2. Fetch-based streaming flow

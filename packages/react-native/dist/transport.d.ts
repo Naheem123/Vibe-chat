@@ -27,8 +27,12 @@ export declare function parseSSEEvent(line: string): SSEEventResult;
  */
 export declare function parseSSELine(line: string): string | null;
 /**
+ * Detects whether the current runtime is React Native (Hermes, Old Arch, or New Arch).
+ */
+export declare function isReactNativeEnvironment(): boolean;
+/**
  * Default OpenRouter / Custom Transport implementation.
- * Seamlessly selects between XMLHttpRequest (React Native Hermes) and
+ * Seamlessly selects between XMLHttpRequest (React Native Hermes iOS/Android) and
  * ReadableStream (Fetch API) for genuine real-time streaming without buffering.
  */
 export declare const defaultOpenRouterTransport: ChatTransport;

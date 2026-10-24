@@ -200,18 +200,26 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
     const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(false);
     const [isModelPickerOpen, setIsModelPickerOpen] = useState<boolean>(false);
     const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-    const [isInitialized, setIsInitialized] = useState<boolean>(false);
+
+    // ── 1. Account-Scoped Initialization State ─────────────────────────────
+    // Tracks the exact user ID for which in-memory conversations are loaded.
+    // null indicates that account switching or initial loading is in progress.
+    const [initializedForUserId, setInitializedForUserId] = useState<string | null>(null);
 
     // Refs
     const flatListRef = useRef<FlatList<Message>>(null);
     const abortControllerRef = useRef<AbortController | null>(null);
     const lastFailedTextRef = useRef<string | null>(null);
 
-    // User scoping & Request lifecycle tracking refs
+    // Track active userId synchronously in a ref
     const activeUserIdRef = useRef<string | undefined>(userId);
     activeUserIdRef.current = userId;
-    const loadedUserIdRef = useRef<string | null>(null);
+
+    // Monotonic request ID counter for ignoring stale asynchronous loads
     const loadRequestIdRef = useRef<number>(0);
+
+    // Track the user ID that initiated the active streaming request
+    const streamingUserIdRef = useRef<string | null>(null);
 
     // Active conversation
     const activeConversation = useMemo(
@@ -234,68 +242,85 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
         abortControllerRef.current.abort();
         abortControllerRef.current = null;
       }
+      streamingUserIdRef.current = null;
       setIsStreaming(false);
     }, []);
 
-    // Unmount and account switch cleanup: cancel active request
+    // ── 2. Request Lifecycle: Cancel on Unmount & Account Switch ────────────
     useEffect(() => {
       return () => {
-        abortStream();
+        if (abortControllerRef.current) {
+          abortControllerRef.current.abort();
+          abortControllerRef.current = null;
+        }
+        streamingUserIdRef.current = null;
+        setIsStreaming(false);
       };
-    }, [abortStream, userId]);
+    }, []);
 
-    // Race-proof Multi-Account / User Scoped Storage loader
-    const loadHistoryForUser = useCallback(async () => {
+    // ── 3. Account-Scoped History Loader (Ignore Stale Async Results) ────────
+    useEffect(() => {
       const targetScope = userId ?? '__guest__';
       const requestId = ++loadRequestIdRef.current;
 
-      // 1. Cancel in-flight request when user changes
+      // 3.1. Immediately abort any in-flight request when user changes
       abortStream();
 
-      // 2. Invalidate loaded state & clear in-memory conversations immediately
-      // to guarantee stale data from previous user is never displayed or saved
-      loadedUserIdRef.current = null;
-      setIsInitialized(false);
+      // 3.2. Immediately mark account as uninitialized and wipe in-memory state
+      // so stale data from the previous account is never held, displayed, or persisted!
+      setInitializedForUserId(null);
       setConversations([]);
       setActiveId(null);
 
-      try {
-        const loaded = await loadUserConversations(storageRef.current, userId);
+      let isCurrent = true;
 
-        // 3. Stale check: discard if user switched again before this resolved
-        if (
-          requestId !== loadRequestIdRef.current ||
-          targetScope !== (activeUserIdRef.current ?? '__guest__')
-        ) {
-          return;
-        }
+      loadUserConversations(storageRef.current, userId)
+        .then((loaded) => {
+          // 3.3. Stale check: Discard if user switched again before this async read resolved
+          if (
+            !isCurrent ||
+            requestId !== loadRequestIdRef.current ||
+            targetScope !== (activeUserIdRef.current ?? '__guest__')
+          ) {
+            return;
+          }
 
-        setConversations(loaded);
-        setActiveId(loaded.length > 0 ? loaded[0].id : null);
-        loadedUserIdRef.current = targetScope;
-      } catch (err: unknown) {
-        console.warn('[VibeChat] Failed to load history:', err);
-      } finally {
-        if (requestId === loadRequestIdRef.current) {
-          setIsInitialized(true);
-        }
-      }
+          setConversations(loaded);
+          setActiveId(loaded.length > 0 ? loaded[0].id : null);
+          setInitializedForUserId(targetScope);
+        })
+        .catch((err) => {
+          console.warn('[VibeChat] Failed to load history:', err);
+          if (
+            isCurrent &&
+            requestId === loadRequestIdRef.current &&
+            targetScope === (activeUserIdRef.current ?? '__guest__')
+          ) {
+            setConversations([]);
+            setActiveId(null);
+            setInitializedForUserId(targetScope);
+          }
+        });
+
+      return () => {
+        isCurrent = false;
+        abortStream();
+      };
     }, [userId, abortStream]);
 
-    // Re-load when userId or storage changes
-    useEffect(() => {
-      loadHistoryForUser();
-    }, [loadHistoryForUser]);
-
-    // Save conversations when updated — strictly guarded by loaded user ID check
+    // ── 4. Account-Scoped Persistence Effect ────────────────────────────────
     useEffect(() => {
       const currentScope = userId ?? '__guest__';
-      // ONLY persist if the in-memory conversations strictly belong to the current user scope!
-      // This completely prevents writing User A's data into User B's namespace.
-      if (loadedUserIdRef.current === currentScope && isInitialized) {
+
+      // CRITICAL REQUIREMENT:
+      // Only persist if initializedForUserId strictly matches currentScope!
+      // When switching accounts, initializedForUserId is null until the new user's own history
+      // has finished loading and populated conversations. This prevents writing User A's data
+      // into User B's namespace.
+      if (initializedForUserId === currentScope) {
         saveUserConversations(storageRef.current, conversations, userId);
       }
-    }, [conversations, isInitialized, userId]);
+    }, [conversations, initializedForUserId, userId]);
 
     // Auto-scroll on new messages or chunk updates
     useEffect(() => {
@@ -307,7 +332,7 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
       }
     }, [messages.length, isStreaming]);
 
-    // Clear history
+    // Clear history for active user
     const handleClearHistory = useCallback(async () => {
       await clearUserConversations(storageRef.current, userId);
       setConversations([]);
@@ -328,6 +353,7 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
 
         const requestUserId = userId;
         const requestScope = userId ?? '__guest__';
+        streamingUserIdRef.current = requestScope;
 
         const isNewConv = !activeId;
         const convId = isNewConv ? uid() : (activeId as string);
@@ -419,8 +445,9 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
             (currentChunk: string) => {
               // Stale check: Drop chunk if user changed accounts or request was cancelled
               if (
-                activeUserIdRef.current !== requestUserId ||
-                controller.signal.aborted
+                controller.signal.aborted ||
+                (activeUserIdRef.current ?? '__guest__') !== requestScope ||
+                streamingUserIdRef.current !== requestScope
               ) {
                 return;
               }
@@ -444,8 +471,9 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
 
           // Stale check: Discard if user switched away before completion
           if (
-            activeUserIdRef.current !== requestUserId ||
-            controller.signal.aborted
+            controller.signal.aborted ||
+            (activeUserIdRef.current ?? '__guest__') !== requestScope ||
+            streamingUserIdRef.current !== requestScope
           ) {
             return;
           }
@@ -468,7 +496,7 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
           }
 
           // Discard if user switched accounts while request was pending
-          if (activeUserIdRef.current !== requestUserId) {
+          if ((activeUserIdRef.current ?? '__guest__') !== requestScope) {
             return;
           }
 
@@ -507,6 +535,7 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
         } finally {
           setIsStreaming(false);
           abortControllerRef.current = null;
+          streamingUserIdRef.current = null;
         }
       },
       [
@@ -564,7 +593,10 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
       [models, model]
     );
 
-    if (!isInitialized) {
+    const isCurrentAccountInitialized =
+      initializedForUserId === (userId ?? '__guest__');
+
+    if (!isCurrentAccountInitialized) {
       return (
         <SafeAreaView
           style={[styles.container, { backgroundColor: colors.background }]}
