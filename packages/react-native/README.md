@@ -171,6 +171,53 @@ const handleLogout = async () => {
 
 ---
 
+## Persistent Storage Across App Restarts
+
+By default, without a storage adapter, the SDK retains history in-memory for the active session. To persist conversation history across mobile app restarts and cold boots, plug in `@react-native-async-storage/async-storage` using the provided `createAsyncStorageAdapter` helper:
+
+```bash
+npm install @react-native-async-storage/async-storage
+# For iOS:
+cd ios && pod install && cd ..
+```
+
+### Complete AsyncStorage Integration Example
+
+```tsx
+import React, { useMemo } from 'react';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import {
+  VibeChatNativeWidget,
+  createAsyncStorageAdapter,
+  noblesseTribeTheme,
+} from '@noblesse/vibe-chat-native';
+
+export function NoblesseAIChat({ currentUserId }: { currentUserId: string }) {
+  // Initialize the persistent adapter once
+  const persistentStorage = useMemo(
+    () => createAsyncStorageAdapter(AsyncStorage),
+    []
+  );
+
+  return (
+    <VibeChatNativeWidget
+      assistantName="Noblesse AI"
+      userId={currentUserId}
+      storage={persistentStorage}
+      theme={noblesseTribeTheme}
+      endpoint="https://api.noblesse-tribe.com/v1/ai/chat"
+    />
+  );
+}
+```
+
+The SDK automatically namespaces storage keys (`vibe_chat_user_{userId}_history`), ensuring that:
+1. Messages persist when the user closes and reopens the app.
+2. If another user signs in on the same physical phone, their conversation history remains completely isolated.
+3. Rapid account switching will never write User A's messages into User B's storage namespace.
+
+---
+
 ## Secure API Key & Backend Architecture
 
 > [!WARNING]

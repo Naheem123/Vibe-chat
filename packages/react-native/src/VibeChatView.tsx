@@ -207,6 +207,12 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
     const abortControllerRef = useRef<AbortController | null>(null);
     const lastFailedTextRef = useRef<string | null>(null);
 
+    // User scoping & Request lifecycle tracking refs
+    const activeUserIdRef = useRef<string | undefined>(userId);
+    activeUserIdRef.current = userId;
+    const loadedUserIdRef = useRef<string | null>(null);
+    const loadRequestIdRef = useRef<number>(0);
+
     // Active conversation
     const activeConversation = useMemo(
       () => conversations.find((c) => c.id === activeId) ?? null,
@@ -222,31 +228,71 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
       onConversationChange?.(activeConversation);
     }, [activeConversation, onConversationChange]);
 
-    // Multi-Account / User Scoped Storage loader
+    // Abort active streaming request
+    const abortStream = useCallback(() => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
+      }
+      setIsStreaming(false);
+    }, []);
+
+    // Unmount and account switch cleanup: cancel active request
+    useEffect(() => {
+      return () => {
+        abortStream();
+      };
+    }, [abortStream, userId]);
+
+    // Race-proof Multi-Account / User Scoped Storage loader
     const loadHistoryForUser = useCallback(async () => {
+      const targetScope = userId ?? '__guest__';
+      const requestId = ++loadRequestIdRef.current;
+
+      // 1. Cancel in-flight request when user changes
+      abortStream();
+
+      // 2. Invalidate loaded state & clear in-memory conversations immediately
+      // to guarantee stale data from previous user is never displayed or saved
+      loadedUserIdRef.current = null;
+      setIsInitialized(false);
+      setConversations([]);
+      setActiveId(null);
+
       try {
         const loaded = await loadUserConversations(storageRef.current, userId);
-        setConversations(loaded);
-        if (loaded.length > 0) {
-          setActiveId(loaded[0].id);
-        } else {
-          setActiveId(null);
+
+        // 3. Stale check: discard if user switched again before this resolved
+        if (
+          requestId !== loadRequestIdRef.current ||
+          targetScope !== (activeUserIdRef.current ?? '__guest__')
+        ) {
+          return;
         }
+
+        setConversations(loaded);
+        setActiveId(loaded.length > 0 ? loaded[0].id : null);
+        loadedUserIdRef.current = targetScope;
       } catch (err: unknown) {
         console.warn('[VibeChat] Failed to load history:', err);
       } finally {
-        setIsInitialized(true);
+        if (requestId === loadRequestIdRef.current) {
+          setIsInitialized(true);
+        }
       }
-    }, [userId]);
+    }, [userId, abortStream]);
 
     // Re-load when userId or storage changes
     useEffect(() => {
       loadHistoryForUser();
     }, [loadHistoryForUser]);
 
-    // Save conversations when updated
+    // Save conversations when updated — strictly guarded by loaded user ID check
     useEffect(() => {
-      if (isInitialized) {
+      const currentScope = userId ?? '__guest__';
+      // ONLY persist if the in-memory conversations strictly belong to the current user scope!
+      // This completely prevents writing User A's data into User B's namespace.
+      if (loadedUserIdRef.current === currentScope && isInitialized) {
         saveUserConversations(storageRef.current, conversations, userId);
       }
     }, [conversations, isInitialized, userId]);
@@ -260,15 +306,6 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
         return () => clearTimeout(timer);
       }
     }, [messages.length, isStreaming]);
-
-    // Abort handler
-    const abortStream = useCallback(() => {
-      if (abortControllerRef.current) {
-        abortControllerRef.current.abort();
-        abortControllerRef.current = null;
-      }
-      setIsStreaming(false);
-    }, []);
 
     // Clear history
     const handleClearHistory = useCallback(async () => {
@@ -288,6 +325,9 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
 
         const controller = new AbortController();
         abortControllerRef.current = controller;
+
+        const requestUserId = userId;
+        const requestScope = userId ?? '__guest__';
 
         const isNewConv = !activeId;
         const convId = isNewConv ? uid() : (activeId as string);
@@ -310,7 +350,7 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
               title: cleanText.slice(0, 40),
               messages: [userMsg],
               updatedAt: Date.now(),
-              userId,
+              userId: requestUserId,
             };
             return [newConv, ...prev];
           }
@@ -377,6 +417,14 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
               apiKey: openRouterKey,
             },
             (currentChunk: string) => {
+              // Stale check: Drop chunk if user changed accounts or request was cancelled
+              if (
+                activeUserIdRef.current !== requestUserId ||
+                controller.signal.aborted
+              ) {
+                return;
+              }
+
               setConversations((prev) =>
                 prev.map((c) => {
                   if (c.id !== convId) return c;
@@ -394,6 +442,14 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
             }
           );
 
+          // Stale check: Discard if user switched away before completion
+          if (
+            activeUserIdRef.current !== requestUserId ||
+            controller.signal.aborted
+          ) {
+            return;
+          }
+
           lastFailedTextRef.current = null;
           onResponseComplete?.({
             id: assistantMsgId,
@@ -402,12 +458,17 @@ export const VibeChatView = forwardRef<VibeChatRef, VibeChatViewProps>(
             timestamp: Date.now(),
           });
         } catch (err: unknown) {
+          // If request was aborted because user switched accounts or stopped manually
           const isCancelled =
             controller.signal.aborted ||
             (err instanceof ChatNetworkError && err.isCancelled);
 
           if (isCancelled) {
-            // Keep partial text received so far
+            return;
+          }
+
+          // Discard if user switched accounts while request was pending
+          if (activeUserIdRef.current !== requestUserId) {
             return;
           }
 

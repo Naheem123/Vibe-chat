@@ -21,6 +21,8 @@ import {
   noblesseTribeTheme,
   NOBLESSE_BRAND,
   VibeChatRef,
+  InMemoryStorageAdapter,
+  createAsyncStorageAdapter,
 } from '../packages/react-native/src';
 
 // Host app brand palette
@@ -38,6 +40,9 @@ const TEST_API_KEY =
   process.env.OPENROUTER_API_KEY || 'sk-or-v1-your-openrouter-key-here';
 
 type ViewMode = 'floating' | 'embedded';
+
+// Multi-session persistent storage simulator (in real apps, pass AsyncStorage)
+const persistentStorageSimulator = new InMemoryStorageAdapter();
 
 export default function App() {
   const [mode, setMode] = useState<ViewMode>('floating');
@@ -154,6 +159,7 @@ export default function App() {
             assistantName="Noblesse AI"
             openRouterKey={TEST_API_KEY}
             userId={userId}
+            storage={persistentStorageSimulator}
             theme={{
               primary: brand.blueDark,
               secondary: brand.blueLight,
@@ -175,6 +181,7 @@ export default function App() {
             assistantName="Noblesse AI"
             openRouterKey={TEST_API_KEY}
             userId={userId}
+            storage={persistentStorageSimulator}
             theme={{
               primary: brand.blueDark,
               secondary: brand.blueLight,

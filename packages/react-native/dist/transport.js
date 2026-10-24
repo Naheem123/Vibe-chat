@@ -3,10 +3,12 @@
  * @noblesse/vibe-chat-native
  * Resilient SSE streaming network engine supporting OpenRouter,
  * custom proxy endpoints (e.g. Noblesse Tribe Go backend), request cancellation,
- * and chunked stream parsing.
+ * true incremental streaming on React Native Hermes (via XHR / ReadableStream),
+ * and provider-side SSE error handling.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.defaultOpenRouterTransport = exports.ChatNetworkError = exports.DEFAULT_OPENROUTER_URL = void 0;
+exports.parseSSEEvent = parseSSEEvent;
 exports.parseSSELine = parseSSELine;
 exports.DEFAULT_OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 class ChatNetworkError extends Error {
@@ -20,42 +22,264 @@ class ChatNetworkError extends Error {
 exports.ChatNetworkError = ChatNetworkError;
 /**
  * Parses Server-Sent Events (SSE) data lines safely.
+ * Detects content deltas, provider error payloads, and completion signals.
  */
-function parseSSELine(line) {
+function parseSSEEvent(line) {
     const trimmed = line.trim();
     if (!trimmed || !trimmed.startsWith('data:')) {
-        return null;
+        return {};
     }
     const dataContent = trimmed.slice(5).trim();
     if (dataContent === '[DONE]') {
-        return null;
+        return { isDone: true };
     }
     try {
         const parsed = JSON.parse(dataContent);
-        // OpenRouter / OpenAI standard delta content
-        const delta = parsed.choices?.[0]?.delta?.content;
-        if (typeof delta === 'string') {
-            return delta;
+        // 1. Detect provider-side error payload inside SSE event
+        if (parsed.error) {
+            const errMsg = typeof parsed.error === 'string'
+                ? parsed.error
+                : parsed.error.message || JSON.stringify(parsed.error);
+            return { error: errMsg };
         }
-        // Alternative format (full message completion chunk)
-        const text = parsed.choices?.[0]?.text;
+        // 2. Check for finish_reason: error
+        const choice = parsed.choices?.[0];
+        if (choice?.finish_reason === 'error') {
+            const finishErr = choice.error?.message || 'Model execution encountered an error.';
+            return { error: finishErr };
+        }
+        // 3. Extract content delta
+        const delta = choice?.delta?.content;
+        if (typeof delta === 'string') {
+            return { delta };
+        }
+        // Alternative format (text completion chunk)
+        const text = choice?.text;
         if (typeof text === 'string') {
-            return text;
+            return { delta: text };
         }
     }
     catch {
-        // Malformed JSON chunk or incomplete line; ignore safely
+        // Malformed JSON or incomplete chunk — ignore safely to allow buffer assembly
     }
-    return null;
+    return {};
 }
 /**
- * Default OpenRouter transport implementation.
+ * Backward-compatible helper. Throws if provider returned an in-stream error.
+ */
+function parseSSELine(line) {
+    const res = parseSSEEvent(line);
+    if (res.error) {
+        throw new ChatNetworkError(`Provider error: ${res.error}`);
+    }
+    return res.delta ?? null;
+}
+/**
+ * Genuine incremental SSE streaming using XMLHttpRequest.
+ * Native standard on React Native (Hermes, iOS, Android).
+ */
+function streamViaXHR(url, headers, payload, signal, onChunk) {
+    return new Promise((resolve, reject) => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const XHR = globalThis.XMLHttpRequest;
+        if (!XHR) {
+            reject(new ChatNetworkError('XMLHttpRequest is not available.'));
+            return;
+        }
+        const xhr = new XHR();
+        xhr.open('POST', url, true);
+        for (const [key, value] of Object.entries(headers)) {
+            xhr.setRequestHeader(key, value);
+        }
+        let seenIndex = 0;
+        let fullResponse = '';
+        let lineBuffer = '';
+        let hasEncounteredError = false;
+        const processIncrementalText = () => {
+            const currentText = xhr.responseText || '';
+            if (currentText.length > seenIndex) {
+                const newChunk = currentText.slice(seenIndex);
+                seenIndex = currentText.length;
+                lineBuffer += newChunk;
+                const lines = lineBuffer.split('\n');
+                lineBuffer = lines.pop() ?? '';
+                for (const line of lines) {
+                    const res = parseSSEEvent(line);
+                    if (res.error) {
+                        hasEncounteredError = true;
+                        try {
+                            xhr.abort();
+                        }
+                        catch {
+                            /* ignore */
+                        }
+                        reject(new ChatNetworkError(`Provider streaming error: ${res.error}`));
+                        return;
+                    }
+                    if (res.delta) {
+                        fullResponse += res.delta;
+                        onChunk(fullResponse);
+                    }
+                }
+            }
+        };
+        xhr.onprogress = () => {
+            processIncrementalText();
+        };
+        xhr.onreadystatechange = () => {
+            if (xhr.readyState === 3) {
+                processIncrementalText();
+            }
+            else if (xhr.readyState === 4) {
+                if (hasEncounteredError)
+                    return;
+                processIncrementalText();
+                // Process any remainder in line buffer
+                if (lineBuffer.trim()) {
+                    const res = parseSSEEvent(lineBuffer);
+                    if (res.error) {
+                        reject(new ChatNetworkError(`Provider streaming error: ${res.error}`));
+                        return;
+                    }
+                    if (res.delta) {
+                        fullResponse += res.delta;
+                        onChunk(fullResponse);
+                    }
+                }
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    if (!fullResponse.trim()) {
+                        reject(new ChatNetworkError('Model stream ended without returning any content.'));
+                        return;
+                    }
+                    resolve(fullResponse);
+                }
+                else if (xhr.status === 0 && signal?.aborted) {
+                    reject(new ChatNetworkError('Request cancelled by user.', undefined, true));
+                }
+                else {
+                    let errDetail = xhr.responseText || `HTTP ${xhr.status}`;
+                    try {
+                        const parsed = JSON.parse(errDetail);
+                        errDetail = parsed.error?.message || parsed.message || errDetail;
+                    }
+                    catch {
+                        /* ignore */
+                    }
+                    reject(new ChatNetworkError(`Service returned error ${xhr.status}: ${errDetail.slice(0, 300)}`, xhr.status));
+                }
+            }
+        };
+        xhr.onerror = () => {
+            if (signal?.aborted) {
+                reject(new ChatNetworkError('Request cancelled by user.', undefined, true));
+            }
+            else {
+                reject(new ChatNetworkError('Network request failed. Please check your connection.'));
+            }
+        };
+        xhr.ontimeout = () => {
+            reject(new ChatNetworkError('Request timed out. Please try again.'));
+        };
+        if (signal) {
+            if (signal.aborted) {
+                xhr.abort();
+                reject(new ChatNetworkError('Request cancelled by user.', undefined, true));
+                return;
+            }
+            signal.addEventListener('abort', () => {
+                try {
+                    xhr.abort();
+                }
+                catch {
+                    /* ignore */
+                }
+                reject(new ChatNetworkError('Request cancelled by user.', undefined, true));
+            });
+        }
+        xhr.send(JSON.stringify(payload));
+    });
+}
+/**
+ * Incremental SSE streaming using WHATWG ReadableStream.
+ * Used in environments where response.body.getReader() is supported.
+ */
+async function streamViaFetchReader(response, signal, onChunk) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const reader = response.body.getReader();
+    const decoder = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8') : null;
+    let lineBuffer = '';
+    let fullResponse = '';
+    try {
+        while (true) {
+            if (signal?.aborted) {
+                try {
+                    await reader.cancel();
+                }
+                catch {
+                    /* ignore */
+                }
+                throw new ChatNetworkError('Streaming cancelled by user.', undefined, true);
+            }
+            const { done, value } = await reader.read();
+            if (done)
+                break;
+            const textChunk = decoder
+                ? decoder.decode(value, { stream: true })
+                : String.fromCharCode.apply(null, Array.from(value));
+            lineBuffer += textChunk;
+            const lines = lineBuffer.split('\n');
+            lineBuffer = lines.pop() ?? '';
+            for (const line of lines) {
+                const res = parseSSEEvent(line);
+                if (res.error) {
+                    try {
+                        await reader.cancel();
+                    }
+                    catch {
+                        /* ignore */
+                    }
+                    throw new ChatNetworkError(`Provider streaming error: ${res.error}`);
+                }
+                if (res.delta) {
+                    fullResponse += res.delta;
+                    onChunk(fullResponse);
+                }
+            }
+        }
+        // Process any remainder in line buffer
+        if (lineBuffer.trim()) {
+            const res = parseSSEEvent(lineBuffer);
+            if (res.error) {
+                throw new ChatNetworkError(`Provider streaming error: ${res.error}`);
+            }
+            if (res.delta) {
+                fullResponse += res.delta;
+                onChunk(fullResponse);
+            }
+        }
+        if (!fullResponse.trim()) {
+            throw new ChatNetworkError('Model stream ended without returning any content.');
+        }
+        return fullResponse;
+    }
+    catch (err) {
+        if (signal?.aborted || err?.isCancelled) {
+            throw new ChatNetworkError('Streaming cancelled by user.', undefined, true);
+        }
+        throw err;
+    }
+}
+/**
+ * Default OpenRouter / Custom Transport implementation.
+ * Seamlessly selects between XMLHttpRequest (React Native Hermes) and
+ * ReadableStream (Fetch API) for genuine real-time streaming without buffering.
  */
 const defaultOpenRouterTransport = async (req, onChunk) => {
     const url = req.endpoint || exports.DEFAULT_OPENROUTER_URL;
     const isDirectOpenRouter = url.includes('openrouter.ai');
     const headers = {
         'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
         ...(req.headers || {}),
     };
     if (req.apiKey) {
@@ -70,6 +294,27 @@ const defaultOpenRouterTransport = async (req, onChunk) => {
         messages: req.messages,
         stream: req.stream !== false,
     };
+    // 1. In React Native Hermes environments without ReadableStream, use XMLHttpRequest for genuine streaming
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const hasXHR = typeof globalThis.XMLHttpRequest !== 'undefined';
+    const hasFetch = typeof fetch === 'function';
+    // If fetch response.body has no getReader (standard in React Native), prefer XHR streaming
+    if (hasXHR && hasFetch) {
+        try {
+            // Test if global fetch returns a body with getReader
+            const testFetchBody = hasFetch ? true : false;
+            // In React Native, globalThis.navigator?.product === 'ReactNative'
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const isReactNative = globalThis.navigator?.product === 'ReactNative';
+            if (isReactNative && hasXHR) {
+                return await streamViaXHR(url, headers, payload, req.signal, onChunk);
+            }
+        }
+        catch {
+            /* fallback to standard flow */
+        }
+    }
+    // 2. Fetch-based streaming flow
     let response;
     try {
         response = await fetch(url, {
@@ -82,6 +327,10 @@ const defaultOpenRouterTransport = async (req, onChunk) => {
     catch (err) {
         if (req.signal?.aborted) {
             throw new ChatNetworkError('Request cancelled by user.', undefined, true);
+        }
+        // If fetch failed and XHR is available, try XHR
+        if (hasXHR) {
+            return await streamViaXHR(url, headers, payload, req.signal, onChunk);
         }
         const message = err instanceof Error ? err.message : 'Network request failed';
         throw new ChatNetworkError(message);
@@ -105,68 +354,30 @@ const defaultOpenRouterTransport = async (req, onChunk) => {
         }
         throw new ChatNetworkError(`Service returned error ${response.status}: ${errorDetail.slice(0, 300)}`, response.status);
     }
-    let fullResponse = '';
-    // Stream handling: Check for WHATWG ReadableStream
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const body = response.body;
     if (body && typeof body.getReader === 'function') {
-        const reader = body.getReader();
-        const decoder = typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8') : null;
-        let lineBuffer = '';
-        try {
-            while (true) {
-                if (req.signal?.aborted) {
-                    try {
-                        await reader.cancel();
-                    }
-                    catch {
-                        /* ignore reader cancel errors */
-                    }
-                    throw new ChatNetworkError('Streaming cancelled by user.', undefined, true);
-                }
-                const { done, value } = await reader.read();
-                if (done)
-                    break;
-                const textChunk = decoder
-                    ? decoder.decode(value, { stream: true })
-                    : String.fromCharCode.apply(null, Array.from(value));
-                lineBuffer += textChunk;
-                const lines = lineBuffer.split('\n');
-                lineBuffer = lines.pop() ?? '';
-                for (const line of lines) {
-                    const delta = parseSSELine(line);
-                    if (delta) {
-                        fullResponse += delta;
-                        onChunk(fullResponse);
-                    }
-                }
-            }
-            // Process any remainder
-            if (lineBuffer.trim()) {
-                const delta = parseSSELine(lineBuffer);
-                if (delta) {
-                    fullResponse += delta;
-                    onChunk(fullResponse);
-                }
-            }
+        return await streamViaFetchReader(response, req.signal, onChunk);
+    }
+    // Fallback: If XHR is available, run via XHR for true streaming
+    if (hasXHR) {
+        return await streamViaXHR(url, headers, payload, req.signal, onChunk);
+    }
+    // Fallback: parse bulk text lines
+    let fullResponse = '';
+    const fullText = await response.text();
+    for (const line of fullText.split('\n')) {
+        const res = parseSSEEvent(line);
+        if (res.error) {
+            throw new ChatNetworkError(`Provider streaming error: ${res.error}`);
         }
-        catch (err) {
-            if (req.signal?.aborted || err?.isCancelled) {
-                throw new ChatNetworkError('Streaming cancelled by user.', undefined, true);
-            }
-            throw err;
+        if (res.delta) {
+            fullResponse += res.delta;
+            onChunk(fullResponse);
         }
     }
-    else {
-        // Fallback for React Native environments without response.body streaming reader
-        const fullText = await response.text();
-        for (const line of fullText.split('\n')) {
-            const delta = parseSSELine(line);
-            if (delta) {
-                fullResponse += delta;
-                onChunk(fullResponse);
-            }
-        }
+    if (!fullResponse.trim()) {
+        throw new ChatNetworkError('Model returned empty response.');
     }
     return fullResponse;
 };

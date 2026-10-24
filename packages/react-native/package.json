@@ -1,6 +1,6 @@
 {
   "name": "@noblesse/vibe-chat-native",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Production-ready AI Chat Widget and Screen View SDK for React Native (iOS & Android) with configurable theming, user-isolated history, and streaming support.",
   "main": "./dist/index.js",
   "module": "./dist/esm/index.js",
