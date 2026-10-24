@@ -94,6 +94,8 @@ declare module 'react-native' {
     scrollToOffset(params: { offset: number; animated?: boolean }): void;
   }
   export const SafeAreaView: React.ComponentType<any>;
+  export const ScrollView: React.ComponentType<any>;
+  export const Image: React.ComponentType<any>;
   export const KeyboardAvoidingView: React.ComponentType<any>;
   export const ActivityIndicator: React.ComponentType<any>;
   export const Pressable: React.ComponentType<any>;

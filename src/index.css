@@ -8,5 +8,5 @@
 
 /* Custom styles for the widget */
 .vibe-chat-widget-open {
-  /* Add any additional CSS classes needed here */
+  pointer-events: auto;
 }
